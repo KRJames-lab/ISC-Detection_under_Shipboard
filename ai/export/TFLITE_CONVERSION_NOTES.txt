@@ -1,0 +1,157 @@
+================================================================================
+  NPU-Conv2D TFLite 변환 기록
+  STM32N6 Neural-ART NPU 배포용
+  2026-04-14
+================================================================================
+
+1. 최종 변환 파이프라인
+--------------------------------------------------------------------------------
+
+  PyTorch (.pt)  -->  Keras (tf.keras)  -->  TFLite (full int8)
+
+  스크립트: ai/export/convert_tflite.py
+  실행:     python -m ai.export.convert_tflite
+  입력:     ai/results/npu_conv2d_best.pt
+  출력:     ai/results/tflite/npu_conv2d_relu_int8.tflite (89 KB)
+
+  세부 과정:
+    Step 1. Keras로 동일 아키텍처 빌드 (MobileNetV2 InvertedResidual)
+    Step 2. PyTorch 가중치를 Keras로 수동 이식 (축 변환 포함)
+    Step 3. tf.function으로 concrete function 추출
+    Step 4. TFLiteConverter.from_concrete_functions()로 full int8 양자화
+    Step 5. 캘리브레이션: 학습 데이터 200개 윈도우 사용
+
+
+2. 실패했던 방법들과 원인
+--------------------------------------------------------------------------------
+
+  [실패 1] ONNX int8 QDQ (onnxruntime quantize_static)
+    - ONNX QDQ 포맷은 Neural-ART NPU 컴파일러와 비호환
+    - stedgeai generate 실행 시 NPU hang (타임아웃)
+    - QDQ 노드를 NPU가 해석하지 못함
+
+  [실패 2] onnx2tf --> TFLite int8
+    - onnx2tf가 output_integer_quantized_tflite=True로 변환해도
+      실제로는 Conv 필터 가중치만 int8, 활성화 텐서는 float32 그대로
+    - 결과: 87개 텐서 중 float32=50, int8=24 (가짜 int8)
+    - stedgeai 결과: 36 epoch 중 34개 SW, 2개 HW (사실상 CPU 실행)
+    - 원인: onnx2tf가 flatbuffer_direct 모드를 강제 사용하여
+      SavedModel을 생성하지 않고, TFLite 양자화가 불완전
+
+  [실패 3] onnx2tf + output_signaturedefs=True (SavedModel 생성 시도)
+    - output_signaturedefs=True를 줘도 flatbuffer_direct 모드 강제
+    - SavedModel 미생성, float32 TFLite만 출력
+
+  [실패 4] TFLiteConverter.from_keras_model()
+    - Keras 3 + TF 2.19 호환성 버그
+    - _freeze_keras_model()에서 TypeError: 'NoneType' object is not callable
+    - keras_deps.get_call_context_function()이 None 반환
+
+  [실패 5] per-channel 양자화
+    - stedgeai에서 broadcast shape 에러: (16,2,3,3) vs (2,1,1,1)
+    - per-channel 스케일이 입력 채널 축(2)에 적용되어 출력 채널 축(16)과 불일치
+
+  [실패 6] uint8 양자화
+    - stedgeai에서 "NOT IMPLEMENTED: Unsigned format" 에러
+    - Neural-ART NPU는 signed int8만 지원
+
+
+3. 성공한 방법의 핵심 포인트
+--------------------------------------------------------------------------------
+
+  (A) onnx2tf 우회 -- Keras 수동 빌드 + 가중치 이식
+      onnx2tf를 완전히 건너뛰고, PyTorch 모델과 동일한 Keras 모델을
+      직접 빌드한 뒤 가중치를 수동으로 옮김. 이렇게 하면 TFLite 양자화를
+      TensorFlow 네이티브 경로로 직접 제어 가능.
+
+  (B) from_concrete_functions() -- Keras 3 호환성 버그 우회
+      TFLiteConverter.from_keras_model()이 Keras 3에서 동작하지 않으므로,
+      tf.function으로 모델을 트레이싱하여 concrete function을 얻고
+      from_concrete_functions()로 변환. Keras 내부 API를 거치지 않음.
+
+      converter = tf.lite.TFLiteConverter.from_concrete_functions(
+          [concrete_fn], keras_model
+      )
+
+  (C) Full int8 강제 -- TFLITE_BUILTINS_INT8
+      converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+      converter.inference_input_type = tf.int8
+      converter.inference_output_type = tf.int8
+
+      이 설정으로 모든 연산자가 int8로 양자화됨.
+      결과: 59개 텐서 중 int8=40, int32=19, float32=0
+
+  (D) 대칭 패딩 -- ZeroPadding2D + valid
+      PyTorch Conv2d(padding=1)은 항상 대칭 패딩 (1,1,1,1).
+      Keras padding='same' + stride=2는 짝수 입력에서 비대칭 패딩 (0,1,0,1).
+      수치 차이의 원인이었음 (max diff 18 -> 1.67e-5로 개선).
+
+      해결: stride>1인 DepthwiseConv2D에 ZeroPadding2D(1) + padding='valid' 적용.
+
+  (E) per-tensor int8 (signed) 양자화
+      - per-channel (X) --> broadcast shape 에러
+      - uint8 (X) --> "NOT IMPLEMENTED: Unsigned format"
+      - per-tensor int8 signed (O) --> NPU 정상 실행
+
+  (F) 모델 입력 shape 변경
+      PyTorch: (1, 2, 1000) --> 모델 내부에서 reshape (1, 2, 20, 50)
+      TFLite:  (1, 20, 50, 2) NHWC --> reshape 없이 직접 2D 입력
+      Reshape 연산을 모델에서 제거하여 양자화 호환성 확보.
+      전처리에서 reshape + NCHW->NHWC 변환을 수행.
+
+
+4. 가중치 축 변환 규칙
+--------------------------------------------------------------------------------
+
+  Conv2D:
+    PyTorch (out_ch, in_ch, H, W) --> Keras (H, W, in_ch, out_ch)
+    np.transpose(w, (2, 3, 1, 0))
+
+  DepthwiseConv2D:
+    PyTorch (ch, 1, H, W) --> Keras (H, W, ch, 1)
+    np.transpose(w, (2, 3, 0, 1))
+
+  BatchNormalization:
+    PyTorch: weight, bias, running_mean, running_var
+    Keras:   gamma, beta, moving_mean, moving_var
+    순서 동일, shape 동일. epsilon=1e-5 맞춤 필수 (Keras 기본값 0.001과 다름).
+
+  Dense (Linear):
+    PyTorch (out, in) --> Keras (in, out)
+    w.T
+
+
+5. 검증 결과
+--------------------------------------------------------------------------------
+
+  수치 정확도:
+    PyTorch vs Keras max diff = 1.67e-05 (PASS)
+
+  양자화 검증:
+    Total tensors: 59
+    int8:  40
+    int32: 19
+    float32: 0  (PASS - full int8)
+
+  AI Studio 벤치마크 (NUCLEO-N657X0-Q, Neural-ART ON):
+    Total epochs:   18
+    SW epochs:       0  (0%)
+    HW epochs:      18  (100%)
+    HW utilization: 99.5%
+    Inference time:  1.014 ms/sample (986 inf/s)
+    Weights:        49.5 KB (octoFlash)
+    Activations:    46.9 KB (npuRAM5)
+    Total memory:   96.4 KB
+
+
+6. 환경
+--------------------------------------------------------------------------------
+
+  Python 3.12
+  PyTorch 2.x
+  TensorFlow 2.19 + Keras 3
+  onnx2tf 1.26+ (flatbuffer_direct 기본)
+  STM32Cube.AI 4.0 (stedgeai)
+  STM32N6 NUCLEO-N657X0-Q (Cortex-M55 + Neural-ART NPU)
+
+================================================================================
