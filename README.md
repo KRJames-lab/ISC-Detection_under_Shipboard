@@ -101,19 +101,19 @@ python -m ai.export.convert_tflite         # → TFLite for STM32Cube.AI
 
 ## Model Architectures
 
-| Model                     | Params | Inputs | Description                                                                                                         |
-| ------------------------- |:------:|:------:| ------------------------------------------------------------------------------------------------------------------- |
-| **EKF + 3σ** (baseline) | — | $V$ | 1RC equivalent-circuit model; ΔSOC-mismatch residual vs per-scenario $3\sigma$ threshold. |
-| [**ModernTCN**](https://github.com/luodhhh/ModernTCN) (ICLR 2024) | 27,873 | $V,T$ | Lightweight large-kernel TCN. |
-| [**LITE**](https://github.com/MSD-IRIMAS/LITE) (IEEE DSAA 2023) | 16,217 | $V,T$ | Light Inception with multi-scale + depthwise-separable convs. |
-| **NPU-Conv2D** | 50,849 | $V,T$ | Compact Conv2D mapped to the STM32N6 Neural-ART NPU. |
+| Model                                                             | Params | Inputs | Description                                                                               |
+| ----------------------------------------------------------------- |:------:|:------:| ----------------------------------------------------------------------------------------- |
+| **EKF + 3σ** (baseline)                                           | —      | $V$    | 1RC equivalent-circuit model; ΔSOC-mismatch residual vs per-scenario $3\sigma$ threshold. |
+| [**ModernTCN**](https://github.com/luodhhh/ModernTCN) (ICLR 2024) | 27,873 | $V,T$  | Lightweight large-kernel TCN.                                                             |
+| [**LITE**](https://github.com/MSD-IRIMAS/LITE) (IEEE DSAA 2023)   | 16,217 | $V,T$  | Light Inception with multi-scale + depthwise-separable convs.                             |
+| **NPU-Conv2D**                                                    | 50,849 | $V,T$  | Compact Conv2D mapped to the STM32N6 Neural-ART NPU.                                      |
 
 ## Vibration Noise Model
 
 Vibration adds a contact-resistance term $\Delta R(t)$ to the cell, proportional
 to the acceleration magnitude, so it appears as noise on the terminal voltage:
 
-$$\Delta R(t) = k_R \, |a(t)|, \qquad V_\text{terminal}(t) = \text{OCV}(\text{SOC}) - I(t)\,\big[R_0 + R_1 + \Delta R(t)\big]$$
+$$\Delta R(t) = k_R \cdot |a(t)|, \qquad V_\text{terminal}(t) = \text{OCV}(\text{SOC}) - I(t)\,\big[R_0 + R_1 + \Delta R(t)\big]$$
 
 The coupling gain $k_R$ (swept $0.05$–$1.0$ mΩ/g) sets the noise strength. The ISC
 fault is a gradual resistance decay $R_\text{ISC}(t)$ from 500 Ω to 5 Ω with time
