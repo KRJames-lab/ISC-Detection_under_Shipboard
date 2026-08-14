@@ -1,6 +1,6 @@
 # ISC Detection under Shipboard Vibration
 
-The paper [**"Internal Short-Circuit Detection in Lithium-Ion Batteries under Shipboard Vibration: A Unified Model-Based and Data-Driven Benchmark with NPU-Accelerated Inference"**][paper]'s experimentation code.
+The paper [**"Internal Short-Circuit Detection in Lithium-Ion Batteries under Shipboard Vibration: A Unified Model-Based and Data-Driven Benchmark with NPU-Accelerated Inference"**][[paper](https://www.mdpi.com/2313-0105/12/8/280)]'s experimentation code.
 
 ## Overview
 
